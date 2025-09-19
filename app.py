@@ -77,9 +77,37 @@ df["Diagnosis"] = df["Mask"].apply(lambda m: positiv_negativ_diagnosis(m))
 print(df.head())
 
 
-sns.countplot(data=df, x = "Diagnosis", palette=["paleturquoise", "salmon"])
+#Diagnosis plot
+sns.countplot(data=df, x = "Diagnosis", palette=["paleturquoise", "salmon"], legend = False)
 plt.xticks(ticks=[0,1], labels=["Negativ", "Positiv"])
 plt.title("Tumor Detected / Not Detected")
+plt.show()
+
+
+#Correlation plot
+numeric_df = df.select_dtypes(include="number")
+corr = numeric_df.corr()
+sns.heatmap(corr, cmap="coolwarm", annot=True)
+plt.show()
+
+
+#compare the photos of image and mask
+image_paths = ["./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_16.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_16_mask.tif",
+               "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_19.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_19_mask.tif",
+               "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_14.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_14_mask.tif",
+               "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4943_20000902\TCGA_CS_4943_20000902_15.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4943_20000902\TCGA_CS_4943_20000902_15_mask.tif",
+               "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4943_20000902\TCGA_CS_4943_20000902_10.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4943_20000902\TCGA_CS_4943_20000902_10_mask.tif",
+               ]
+fig, axes = plt.subplots(5, 2, figsize=(10,10))  
+axes = axes.flatten()  
+for ax, path in zip(axes, image_paths):
+    img = cv2.imread(path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  
+    ax.imshow(img)
+    ax.axis("off") 
+
+fig.suptitle("Image and Mask", fontsize=16) 
+fig.tight_layout(rect=[0, 0, 1, 0.96]) 
 plt.show()
 
 
