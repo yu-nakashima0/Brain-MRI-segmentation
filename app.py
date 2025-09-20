@@ -14,6 +14,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from sklearn.model_selection import train_test_split
 
+
 #api = KaggleApi()
 #api.authenticate()
 #datasets = api.dataset_list(search='kaggle-3m')
@@ -84,7 +85,7 @@ print(df.head())
 
 
 #Diagnosis plot
-sns.countplot(data=df, x = "Diagnosis", palette=["paleturquoise", "salmon"], legend = False)
+sns.countplot(data=df, x = "Diagnosis",  hue="Diagnosis", palette=["paleturquoise", "salmon"], legend = False)
 plt.xticks(ticks=[0,1], labels=["Negativ", "Positiv"])
 plt.title("Tumor Detected / Not Detected")
 plt.show()
@@ -145,42 +146,132 @@ PATCH_SIZE = 128 #final size of photo : 128 * 128
 
 #make a pipeliene for training -> diversify training data ->  prevent overfitting
 strong_transforms = A.Compose([
-    A.RandomResizedCrop(width = PATCH_SIZE, height = PATCH_SIZE, p=1.0),
+    A.RandomResizedCrop(size=(PATCH_SIZE, PATCH_SIZE), p=1.0),
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
     A.RandomRotate90(p=0.5),
     A.Transpose(p=0.5),
-    A.ShiftScaleRotate(shift_limit=0.01, scale_limit=0.04, rotate_limit=0, p=0.25),
-    
+
+    A.Affine(translate_percent=(0.01, 0.01), scale=(0.96, 1.04), rotate=0, p=0.25),
+
     # Pixels
     A.RandomBrightnessContrast(p=0.5),
     A.RandomGamma(p=0.25),
-    A.IAAEmboss(p=0.25),
-    A.Blur(p=0.01, blur_limit = 3),
-    
-    # Affine
+    A.Emboss(p=0.25),
+    A.Blur(p=0.01, blur_limit=3),
+
+    # Elastic / Distort
     A.OneOf([
-        A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
+        A.ElasticTransform(alpha=120, sigma=120*0.05, p=0.5),
         A.GridDistortion(p=0.5),
-        A.OpticalDistortion(p=1, distort_limit=2, shift_limit=0.5)                  
+        A.OpticalDistortion(distort_limit=2, p=1)
     ], p=0.8),
-    
-    
+
     A.Normalize(p=1.0),
-  
     ToTensorV2(),
 ])
 
-# make a pipeline for test / validation
+# validation / test
 transforms = A.Compose([
-    A.Resize(width = PATCH_SIZE, height = PATCH_SIZE, p=1.0),
+    A.Resize(width=PATCH_SIZE, height=PATCH_SIZE, p=1.0),
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
     A.RandomRotate90(p=0.5),
     A.Transpose(p=0.5),
-    A.ShiftScaleRotate(shift_limit=0.01, scale_limit=0.04, rotate_limit=0, p=0.25),
+    A.Affine(translate_percent=(0.01, 0.01), scale=(0.96, 1.04), rotate=0, p=0.25),
 
     A.Normalize(p=1.0),
     ToTensorV2(),
 ])
+
+
+# split dataset into target and not target
+y = df["Diagnosis"]
+X = df.drop(columns = "Diagnosis")
+
+
+
+# Split df into train_df and val_df
+train_df, val_df = train_test_split(df, stratify=df.Diagnosis, test_size=0.1)
+train_df = train_df.reset_index(drop=True)
+val_df = val_df.reset_index(drop=True)
+
+# Split train_df into train_df and test_df
+train_df, test_df = train_test_split(train_df, stratify=train_df.Diagnosis, test_size=0.15)
+train_df = train_df.reset_index(drop=True)
+
+# train
+train_dataset = BrainMriDataset(df=train_df, transforms=transforms)
+train_dataloader = DataLoader(train_dataset, batch_size=26, num_workers=4, shuffle=True)
+
+# val
+val_dataset = BrainMriDataset(df=val_df, transforms=transforms)
+val_dataloader = DataLoader(val_dataset, batch_size=26, num_workers=4, shuffle=True)
+
+#test
+test_dataset = BrainMriDataset(df=test_df, transforms=transforms)
+test_dataloader = DataLoader(test_dataset, batch_size=26, num_workers=4, shuffle=True)
+
+
+# Unet
+def double_conv(in_channels, out_channels):
+    return nn.Sequential(
+        nn.Conv2d(in_channels, out_channels, 3, padding=1),
+        nn.ReLU(inplace=True),
+        nn.Conv2d(out_channels, out_channels, 3, padding=1),
+        nn.ReLU(inplace=True))
+
+class UNet(nn.Module):
+
+    def __init__(self, n_classes):
+        super().__init__()
+                
+        self.conv_down1 = double_conv(3, 64)
+        self.conv_down2 = double_conv(64, 128)
+        self.conv_down3 = double_conv(128, 256)
+        self.conv_down4 = double_conv(256, 512)        
+
+        self.maxpool = nn.MaxPool2d(2)
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)        
+        
+        self.conv_up3 = double_conv(256 + 512, 256)
+        self.conv_up2 = double_conv(128 + 256, 128)
+        self.conv_up1 = double_conv(128 + 64, 64)
+        
+        self.last_conv = nn.Conv2d(64, n_classes, kernel_size=1)
+        
+        
+    def forward(self, x):
+        # Batch - 1d tensor.  N_channels - 1d tensor, IMG_SIZE - 2d tensor.
+        # Example: x.shape >>> (10, 3, 256, 256).
+        
+        conv1 = self.conv_down1(x)  # <- BATCH, 3, IMG_SIZE  -> BATCH, 64, IMG_SIZE..
+        x = self.maxpool(conv1)     # <- BATCH, 64, IMG_SIZE -> BATCH, 64, IMG_SIZE 2x down.
+        conv2 = self.conv_down2(x)  # <- BATCH, 64, IMG_SIZE -> BATCH,128, IMG_SIZE.
+        x = self.maxpool(conv2)     # <- BATCH, 128, IMG_SIZE -> BATCH, 128, IMG_SIZE 2x down.
+        conv3 = self.conv_down3(x)  # <- BATCH, 128, IMG_SIZE -> BATCH, 256, IMG_SIZE.
+        x = self.maxpool(conv3)     # <- BATCH, 256, IMG_SIZE -> BATCH, 256, IMG_SIZE 2x down.
+        x = self.conv_down4(x)      # <- BATCH, 256, IMG_SIZE -> BATCH, 512, IMG_SIZE.
+        x = self.upsample(x)        # <- BATCH, 512, IMG_SIZE -> BATCH, 512, IMG_SIZE 2x up.
+        
+        #(Below the same)                                 N this       ==        N this.  Because the first N is upsampled.
+        x = torch.cat([x, conv3], dim=1) # <- BATCH, 512, IMG_SIZE & BATCH, 256, IMG_SIZE--> BATCH, 768, IMG_SIZE.
+        
+        x = self.conv_up3(x) #  <- BATCH, 768, IMG_SIZE --> BATCH, 256, IMG_SIZE. 
+        x = self.upsample(x)  #  <- BATCH, 256, IMG_SIZE -> BATCH,  256, IMG_SIZE 2x up.   
+        x = torch.cat([x, conv2], dim=1) # <- BATCH, 256,IMG_SIZE & BATCH, 128, IMG_SIZE --> BATCH, 384, IMG_SIZE.  
+
+        x = self.conv_up2(x) # <- BATCH, 384, IMG_SIZE --> BATCH, 128 IMG_SIZE. 
+        x = self.upsample(x)   # <- BATCH, 128, IMG_SIZE --> BATCH, 128, IMG_SIZE 2x up.     
+        x = torch.cat([x, conv1], dim=1) # <- BATCH, 128, IMG_SIZE & BATCH, 64, IMG_SIZE --> BATCH, 192, IMG_SIZE.  
+        
+        x = self.conv_up1(x) # <- BATCH, 128, IMG_SIZE --> BATCH, 64, IMG_SIZE.
+        
+        out = self.last_conv(x) # <- BATCH, 64, IMG_SIZE --> BATCH, n_classes, IMG_SIZE.
+        out = torch.sigmoid(out)
+        
+        return out
     
+unet = UNet(n_classes=1).to(device)
+output = unet(torch.randn(1,3,256,256).to(device))
+print("",output.shape)
