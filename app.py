@@ -1,12 +1,18 @@
 import os
 import cv2
-import glob
 import seaborn as sns
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import ImageGrid
 from kaggle.api.kaggle_api_extended import KaggleApi
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from sklearn.model_selection import train_test_split
 
 #api = KaggleApi()
 #api.authenticate()
@@ -92,11 +98,11 @@ plt.show()
 
 
 #compare the photos of image and mask
-image_paths = ["./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_16.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_16_mask.tif",
-               "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_19.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_19_mask.tif",
-               "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_14.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4941_19960909\TCGA_CS_4941_19960909_14_mask.tif",
-               "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4943_20000902\TCGA_CS_4943_20000902_15.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4943_20000902\TCGA_CS_4943_20000902_15_mask.tif",
-               "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4943_20000902\TCGA_CS_4943_20000902_10.tif", "./datasets/kaggle-3m/kaggle_3m\TCGA_CS_4943_20000902\TCGA_CS_4943_20000902_10_mask.tif",
+image_paths = ["./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4941_19960909\\TCGA_CS_4941_19960909_16.tif", "./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4941_19960909\\TCGA_CS_4941_19960909_16_mask.tif",
+               "./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4941_19960909\\TCGA_CS_4941_19960909_19.tif", "./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4941_19960909\\TCGA_CS_4941_19960909_19_mask.tif",
+               "./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4941_19960909\\TCGA_CS_4941_19960909_14.tif", "./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4941_19960909\\TCGA_CS_4941_19960909_14_mask.tif",
+               "./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4943_20000902\\TCGA_CS_4943_20000902_15.tif", "./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4943_20000902\\TCGA_CS_4943_20000902_15_mask.tif",
+               "./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4943_20000902\\TCGA_CS_4943_20000902_10.tif", "./datasets/kaggle-3m/kaggle_3m\\TCGA_CS_4943_20000902\\TCGA_CS_4943_20000902_10_mask.tif",
                ]
 fig, axes = plt.subplots(5, 2, figsize=(10,10))  
 axes = axes.flatten()  
@@ -111,3 +117,70 @@ fig.tight_layout(rect=[0, 0, 1, 0.96])
 plt.show()
 
 
+#Preprocessing and Data Augmentation
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+class BrainMriDataset(Dataset):
+    def __init__(self, df, transforms):
+        
+        self.df = df
+        self.transforms = transforms
+        
+    def __len__(self):
+        return len(self.df) #total length of dataset
+    
+    def __getitem__(self, idx):
+        image = cv2.imread(self.df.iloc[idx, 1]) #get path for image of certain index(idx) and read image as BGR format
+        mask = cv2.imread(self.df.iloc[idx, 2], 0) #get path for mask of certain index(idx) and read mask as BGR format
+
+        augmented = self.transforms(image=image, mask=mask) #Apply the same random transformation to both the image and the mask
+ 
+        image = augmented['image']
+        mask = augmented['mask']   
+        
+        return image, mask # return image and mask which were processed
+
+
+#transform
+PATCH_SIZE = 128 #final size of photo : 128 * 128
+
+#make a pipeliene for training -> diversify training data ->  prevent overfitting
+strong_transforms = A.Compose([
+    A.RandomResizedCrop(width = PATCH_SIZE, height = PATCH_SIZE, p=1.0),
+    A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.5),
+    A.RandomRotate90(p=0.5),
+    A.Transpose(p=0.5),
+    A.ShiftScaleRotate(shift_limit=0.01, scale_limit=0.04, rotate_limit=0, p=0.25),
+    
+    # Pixels
+    A.RandomBrightnessContrast(p=0.5),
+    A.RandomGamma(p=0.25),
+    A.IAAEmboss(p=0.25),
+    A.Blur(p=0.01, blur_limit = 3),
+    
+    # Affine
+    A.OneOf([
+        A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
+        A.GridDistortion(p=0.5),
+        A.OpticalDistortion(p=1, distort_limit=2, shift_limit=0.5)                  
+    ], p=0.8),
+    
+    
+    A.Normalize(p=1.0),
+  
+    ToTensorV2(),
+])
+
+# make a pipeline for test / validation
+transforms = A.Compose([
+    A.Resize(width = PATCH_SIZE, height = PATCH_SIZE, p=1.0),
+    A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.5),
+    A.RandomRotate90(p=0.5),
+    A.Transpose(p=0.5),
+    A.ShiftScaleRotate(shift_limit=0.01, scale_limit=0.04, rotate_limit=0, p=0.25),
+
+    A.Normalize(p=1.0),
+    ToTensorV2(),
+])
+    
